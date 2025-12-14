@@ -1,0 +1,151 @@
+Secured and monitored web infrastructure design for www.foobar.com
+
+This design keeps the same “3 server” base idea (1 load balancer + 2 backend servers),
+but adds security (firewalls + HTTPS) and monitoring (agents/clients).
+
+1) How a user reaches the website (secured flow)
+
+- A user types "https://www.foobar.com" in a browser.
+- DNS resolves "www.foobar.com" to the public IP of the load balancer.
+- The browser negotiates TLS with the load balancer using the SSL certificate for www.foobar.com.
+- Encrypted HTTPS traffic reaches HAProxy on the load balancer.
+- HAProxy forwards the request to one of the backend servers (for example, Round Robin).
+- On the chosen backend:
+  - Nginx serves static files or proxies dynamic requests to the application server.
+  - The application server executes code and interacts with MySQL when needed.
+- The response is returned back through HAProxy to the browser over the encrypted connection.
+
+2) Diagram (text version)
+
+                 +-----------------------------------+
+User  <--------> | Load Balancer Server              |
+HTTPS/TLS/TCP    | - HAProxy                         |
+                 | - SSL certificate (TLS termination)|
+                 | - Firewall                         |
+                 | - Monitoring client                |
+                 +------------------+----------------+
+                                    |
+                                    | forwards traffic
+                  +-----------------+-----------------+
+                  |                                   |
+                  v                                   v
++----------------------------------+     +----------------------------------+
+| Backend Server 1                 |     | Backend Server 2                 |
+| - Firewall                       |     | - Firewall                       |
+| - Nginx (web server)             |     | - Nginx (web server)             |
+| - Application server + app files |     | - Application server + app files |
+| - MySQL (Primary or Replica)     |     | - MySQL (Replica or Primary)     |
+| - Monitoring client              |     | - Monitoring client              |
++----------------------------------+     +----------------------------------+
+
+MySQL replication:
+- One MySQL instance is Primary (accepts writes).
+- The other is Replica (receives changes from the Primary).
+
+3) What was added and why
+
+A) 3 firewalls (one per server)
+- Why add them:
+  - Reduce attack surface by allowing only necessary inbound/outbound traffic.
+  - Protect against unsolicited access (for example, blocking public MySQL access).
+  - Enforce security rules per role (LB, backend, database connections).
+
+B) SSL certificate for www.foobar.com (HTTPS)
+- Why add it:
+  - Encrypts traffic so credentials, cookies, and content cannot be easily sniffed or altered.
+  - Provides authenticity (the browser can validate it is really www.foobar.com).
+  - Protects users from man-in-the-middle attacks.
+
+C) 3 monitoring clients (agents/collectors)
+- Why add them:
+  - Visibility into health, performance, and failures across all servers.
+  - Centralized logging and metrics (CPU, RAM, disk, network, app logs, Nginx logs, HAProxy stats).
+  - Alerts when something breaks instead of finding out from users.
+
+4) What firewalls are for
+
+A firewall filters network traffic based on rules such as:
+- which IPs are allowed,
+- which ports are allowed,
+- which protocols are allowed,
+- and in which direction traffic is allowed (inbound/outbound).
+
+Typical examples in this setup:
+- Load balancer firewall:
+  - Allow inbound 443 (HTTPS) from the Internet.
+  - Allow inbound 80 only if you want HTTP->HTTPS redirects.
+  - Allow outbound to backend servers on the internal ports used (e.g., 80/443).
+- Backend server firewalls:
+  - Allow inbound traffic only from the load balancer to Nginx (not from the public Internet).
+  - Allow inbound SSH only from a trusted admin IP range.
+  - Allow MySQL port only from the other backend server (replication) or from local app.
+- Database rules (if DB is reachable):
+  - Do NOT allow MySQL port from the public Internet.
+
+5) Why serve traffic over HTTPS
+
+- Confidentiality: encrypts data in transit.
+- Integrity: reduces the chance of traffic being modified in transit.
+- Authentication: certificate proves the site identity to the browser.
+- Modern browsers also warn users about non-HTTPS pages, and HTTPS is expected for login forms.
+
+6) What monitoring is used for
+
+Monitoring helps you:
+- Detect failures early (server down, service not responding, high error rate).
+- Track performance trends (response time, throughput, latency, CPU/memory usage).
+- Investigate incidents (centralized logs and metrics).
+- Set alerts (e.g., “5xx rate > X”, “disk usage > 90%”, “replication lag > Y seconds”).
+
+7) How the monitoring tool collects data
+
+Using a service such as Sumo Logic (or any similar monitoring/log platform), collection usually works like this:
+
+- An agent (monitoring client) is installed on each server.
+- The agent:
+  - Reads log files (Nginx access/error logs, HAProxy logs, system logs).
+  - Collects system metrics (CPU, RAM, disk, network I/O).
+  - Optionally scrapes application metrics endpoints (like /metrics if using Prometheus format).
+- The agent sends this data to the monitoring service over HTTPS to a centralized dashboard.
+
+8) How to monitor your web server QPS (queries/requests per second)
+
+To monitor Nginx QPS you can:
+- Enable Nginx access logs and ship them to the monitoring platform.
+  - QPS can be computed as: count of requests / time window.
+  - In the monitoring tool, create a query/graph that counts requests per second.
+
+Better (more direct) option:
+- Enable Nginx stub_status (or an exporter) to expose request counters.
+- Have the monitoring system scrape these counters and calculate QPS from the rate of change.
+
+Example approach:
+- Turn on Nginx stub_status on an internal endpoint (only accessible internally).
+- The monitoring agent collects the request counters periodically.
+- In dashboards, graph the rate of increase as QPS.
+
+9) Issues / limitations of this infrastructure
+
+A) Why SSL termination at the load balancer can be an issue
+- If TLS is terminated at the load balancer and traffic from the load balancer to backend servers is plain HTTP:
+  - Traffic inside the network is unencrypted and could be sniffed if the internal network is compromised.
+  - Sensitive headers/cookies can travel in clear text between LB and backend.
+- Mitigation:
+  - Use TLS all the way to the backend (end-to-end encryption) or a private network/VPN + strict firewall rules.
+
+B) Why only one MySQL server accepting writes is an issue
+- The Primary database is a bottleneck and a SPOF for write operations.
+- If the Primary fails:
+  - The application cannot write until manual or automated failover promotes the Replica.
+- Writes also cannot be scaled easily with this simple Primary-Replica approach.
+
+C) Why having servers with the same components might be a problem
+- Resource contention:
+  - Nginx, app server, and MySQL compete for CPU/RAM/disk on the same machine.
+- Harder troubleshooting:
+  - When performance drops, it is less clear whether the web layer, app layer, or DB layer is the cause.
+- Scaling becomes inefficient:
+  - If you only need more application capacity, you are still forced to also run extra MySQL instances.
+- Security surface is larger:
+  - More services per server means more ports, more configs, and more potential vulnerabilities.
+
