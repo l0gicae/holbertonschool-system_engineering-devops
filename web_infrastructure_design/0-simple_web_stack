@@ -1,0 +1,84 @@
+Simple web stack design for www.foobar.com
+
+1) User request flow
+
+- A user opens a web browser and types "www.foobar.com".
+- The browser asks DNS to resolve "www.foobar.com" to an IP address.
+- DNS returns 8.8.8.8, which is the public IP of our server.
+- The browser opens a TCP connection to 8.8.8.8 on port 80 (HTTP) or 443 (HTTPS).
+- The HTTP request reaches the server where Nginx (web server) is listening.
+- Nginx serves static content directly and forwards dynamic requests to the application server.
+- The application server runs the application code and, if needed, queries the MySQL database.
+- The application server sends the response back to Nginx.
+- Nginx sends the final HTTP response to the user’s browser, which renders the page.
+
+ASCII overview (one-server stack)
+
+User browser
+    |
+    |  HTTP/HTTPS over TCP/IP
+    v
++-----------------------------------------+
+|  Single server (public IP: 8.8.8.8)     |
+|                                         |
+|  Nginx (web server)                     |
+|        -> Application server + app code |
+|                -> MySQL database        |
++-----------------------------------------+
+
+2) Components and their roles
+
+- Server
+  - A physical or virtual machine connected to the Internet with IP 8.8.8.8.
+  - Runs the OS and all services: Nginx, application server, MySQL, and stores the application files.
+
+- Domain name: foobar.com
+  - Human-readable name used instead of IP 8.8.8.8.
+  - Lets users easily access the website.
+
+- DNS record for www.foobar.com
+  - "www" is a DNS A record.
+  - Maps www.foobar.com to 8.8.8.8.
+
+- Web server (Nginx)
+  - Listens for incoming HTTP/HTTPS requests.
+  - Serves static content (HTML, CSS, JS, images).
+  - Forwards dynamic requests to the application server (reverse proxy).
+
+- Application server
+  - Runs the business logic of the website (the application code).
+  - Receives requests from Nginx, processes them, and builds responses.
+  - Communicates with the MySQL database when data is needed.
+
+- Application files (code base)
+  - All source code, templates, configs, and static assets of the website.
+  - Stored on the same server and used by the application server.
+
+- Database (MySQL)
+  - Stores persistent data (users, posts, orders, etc.).
+  - Receives SQL queries from the application server and returns results.
+
+3) Communication between user and server
+
+- The server and the user’s computer communicate over:
+  - IP (for addressing and routing on the Internet),
+  - TCP (for reliable transport, usually port 80 or 443),
+  - HTTP/HTTPS (for web requests and responses).
+- In short: the server uses the TCP/IP protocol stack and HTTP/HTTPS to talk to the user’s browser.
+
+4) Issues with this simple infrastructure
+
+- Single Point Of Failure (SPOF)
+  - All roles (web server, app server, database, storage) are on one machine.
+  - If this server fails, the whole website is down.
+
+- Downtime during maintenance
+  - Any operation that requires restarting Nginx, the application server, MySQL, or the OS
+    will stop the website (no second server to handle traffic).
+  - Deployments, upgrades, and patches cause visible downtime.
+
+- Cannot scale under high traffic
+  - One server has limited CPU, RAM, disk, and network capacity.
+  - As traffic grows, responses become slow or requests may fail.
+  - To scale, you would need a more complex architecture (load balancer, multiple app servers,
+    separate DB server, caching, etc.), which this single-server setup does not provide.
