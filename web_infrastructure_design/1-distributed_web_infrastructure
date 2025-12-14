@@ -1,0 +1,123 @@
+Distributed web infrastructure design for www.foobar.com (3 servers)
+
+1) User request flow (high level)
+
+- A user opens a browser and types "www.foobar.com".
+- DNS resolves "www.foobar.com" to the public IP of the load balancer.
+- The browser opens an HTTP/HTTPS connection to the load balancer.
+- The load balancer (HAProxy) forwards the request to one of the backend web servers using its distribution algorithm.
+- The selected backend server uses Nginx to serve static content and to proxy dynamic requests to the application server.
+- The application server executes the application code and reads/writes data in the database.
+- For writes, the application talks to the Primary (Master) MySQL node.
+- The Primary replicates data changes to the Replica (Slave) MySQL node.
+- The response returns back through Nginx -> HAProxy -> user.
+
+ASCII overview
+
+                     +----------------------+
+User browser  <----->|  Load Balancer       |
+HTTP/HTTPS over TCP  |  HAProxy             |
+                     +----------+-----------+
+                                |
+                                | forwards requests
+                                |
+           +--------------------+--------------------+
+           |                                         |
+           v                                         v
++---------------------------+             +---------------------------+
+| Server A (web/app/db)     |             | Server B (web/app/db)     |
+| - Nginx (web server)      |             | - Nginx (web server)      |
+| - Application server      |             | - Application server      |
+| - App files (code base)   |             | - App files (code base)   |
+| - MySQL (Primary or Rep.) |             | - MySQL (Replica or Prim.)|
++-------------+-------------+             +-------------+-------------+
+              |                                           ^
+              |  MySQL replication (binlog)               |
+              +-------------------------------------------+
+
+Note: In practice, DB roles are usually separated from web/app servers, but this task
+requires each server to contain MySQL. The key idea is that one MySQL instance acts
+as Primary and the other acts as Replica.
+
+2) Elements added and why
+
+A) Load balancer (HAProxy)
+- Why add it:
+  - Distributes incoming traffic across two backend servers to improve availability and performance.
+  - Helps handle more concurrent users than a single server.
+  - Allows one backend server to be taken out for maintenance while the other still serves traffic (reduced downtime).
+
+B) Second server (two backend servers total)
+- Why add it:
+  - Redundancy: if one backend server fails, the other can continue serving requests.
+  - Scalability: traffic can be spread across both servers instead of overloading one machine.
+
+C) Database replication (Primary-Replica)
+- Why add it:
+  - Improves availability of data: if the Primary fails, a Replica may be promoted.
+  - Improves read performance when the application can send read queries to the Replica.
+  - Provides an additional copy of data for recovery (not a substitute for backups).
+
+3) Load balancer distribution algorithm
+
+Example algorithm: Round Robin
+- How it works:
+  - HAProxy sends the first request to Server A, the next request to Server B, then repeats.
+  - Over time, requests are evenly distributed across both backend servers.
+- Alternative algorithms (not required, but common):
+  - Least Connections: sends new requests to the server currently handling the fewest active connections.
+  - Source IP hash: consistently maps a client IP to the same backend server (useful for stickiness).
+
+4) Active-Active vs Active-Passive for the load balancer
+
+In this design, the load balancer is Active-Active with respect to backend servers:
+- Active-Active:
+  - Both backend servers (Server A and Server B) actively receive traffic at the same time.
+  - HAProxy distributes requests to both.
+- Active-Passive:
+  - Only one backend server receives traffic (active).
+  - The second backend server stays idle (passive) and only takes over if the active server fails.
+
+Important note:
+- Here we have ONE load balancer, so the load balancer itself is not redundant.
+- Active-Active / Active-Passive describes how traffic is handled across backends (or across LBs in more advanced setups).
+
+5) How a Primary-Replica (Master-Slave) MySQL cluster works
+
+- The Primary node handles all write operations (INSERT/UPDATE/DELETE).
+- The Primary records data changes in binary logs (binlogs).
+- The Replica node connects to the Primary and continuously pulls these binlog events.
+- The Replica replays the events locally to keep a near-real-time copy of the Primary’s data.
+- Replication is usually asynchronous by default, meaning the Replica can lag behind the Primary.
+
+6) Difference between the Primary and the Replica for the application
+
+- Primary (Master):
+  - The application sends all writes to the Primary.
+  - The Primary is the source of truth for the most up-to-date data.
+- Replica (Slave):
+  - The application can send read queries to the Replica to reduce load on the Primary (optional).
+  - The Replica should not be used for writes (to avoid inconsistency and conflicts).
+  - Data may be slightly delayed compared to the Primary due to replication lag.
+
+7) Issues / limitations of this infrastructure
+
+A) SPOF (Single Points of Failure)
+- The load balancer is a SPOF:
+  - If HAProxy goes down, users cannot reach the website even if both backend servers are healthy.
+- DNS can also be considered a SPOF if misconfigured or provider issues occur.
+- Database Primary is a SPOF for writes:
+  - If the Primary fails, the application cannot write until failover/promotion is performed.
+
+B) Security issues
+- No firewall:
+  - All ports may be exposed publicly (SSH, MySQL, app server ports), increasing attack surface.
+- No HTTPS:
+  - Traffic can be intercepted or modified (MITM attacks).
+  - Credentials and session cookies can be stolen if transmitted over plain HTTP.
+
+C) No monitoring
+- Without monitoring, you may not detect:
+  - Server failures, high CPU/RAM, disk full, DB replication lag, or HAProxy backend failures.
+- No alerting means problems are noticed only after users report them.
+
