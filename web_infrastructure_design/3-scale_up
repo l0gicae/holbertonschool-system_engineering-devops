@@ -1,0 +1,113 @@
+Scale up infrastructure design for www.foobar.com
+
+This design builds on the previous setups and focuses on scaling and better separation of concerns.
+Main changes:
+- Add 1 extra server.
+- Add a second HAProxy and configure the load balancers as a cluster (high availability).
+- Split components so web server, application server, and database are not all on the same machines.
+
+1) Why scale up / what changes
+
+A) Add 1 server
+- Why:
+  - More capacity and better separation of roles.
+  - Allows moving a component (or part of a component) off the existing servers to reduce resource contention.
+  - Improves reliability by reducing “everything on one box” risk.
+
+B) Add a second load balancer (HAProxy) as a cluster
+- Why:
+  - In earlier designs, the single load balancer was a Single Point Of Failure.
+  - A second load balancer enables high availability: if one load balancer fails, the other can still receive traffic.
+- Typical implementation:
+  - Active-Passive using VRRP (Keepalived) with a floating Virtual IP (VIP).
+  - Or Active-Active with DNS/load distribution, depending on the environment.
+  - The most common simple approach is Active-Passive + VIP.
+
+C) Split components across dedicated servers
+- Why:
+  - Performance: web, application, and database compete for CPU/RAM/disk if they run together.
+  - Easier scaling: you can scale the layer that needs it (add more app servers without touching DB).
+  - Better security: database can be isolated from the public Internet.
+  - Easier operations: upgrades, deployments, and troubleshooting are clearer per layer.
+
+2) Proposed architecture (text diagram)
+
+Users
+  |
+  |  HTTPS (TCP/443)
+  v
++-------------------------+      +-------------------------+
+| Load Balancer 1         |      | Load Balancer 2         |
+| HAProxy                 |<---->| HAProxy                 |
+| (clustered with LB2)    |      | (clustered with LB1)    |
++------------+------------+      +------------+------------+
+             |                                |
+             |  forwards traffic (VIP points here)
+             v
+       +---------------------+
+       | Web Server          |
+       | Nginx               |
+       +----------+----------+
+                  |
+                  | proxies dynamic requests
+                  v
+       +---------------------+
+       | Application Server  |
+       | App server + code   |
+       +----------+----------+
+                  |
+                  | SQL queries (private network)
+                  v
+       +---------------------+
+       | Database Server     |
+       | MySQL (Primary)     |
+       +---------------------+
+
+Notes:
+- The web server and application server are separated from the database.
+- HAProxy is now redundant (clustered).
+- This is a “scale up” baseline: later you can scale out by adding more web/app servers.
+
+3) Request flow (step by step)
+
+- User requests https://www.foobar.com.
+- DNS points www.foobar.com to a Virtual IP handled by the HAProxy cluster.
+- One HAProxy instance is active for the VIP (in Active-Passive); if it fails, the other takes over.
+- HAProxy forwards the request to the web server (Nginx).
+- Nginx:
+  - serves static files directly,
+  - forwards dynamic requests to the application server.
+- The application server processes logic and reads/writes data on the MySQL database server.
+- Response returns back through Nginx -> HAProxy -> user.
+
+4) What “clustered load balancers” means (simple explanation)
+
+- Two HAProxy servers are configured together so the service is still reachable if one dies.
+- Common approach: Active-Passive
+  - One HAProxy is active and owns the Virtual IP (VIP).
+  - The other is standby and constantly checks health.
+  - If the active HAProxy fails, the standby takes over the VIP quickly.
+
+(Active-Active is possible too, but typically requires more complexity: multiple VIPs, DNS distribution, or BGP/anycast.)
+
+5) Application server vs web server (short, practical difference)
+
+- Web server (Nginx)
+  - Handles HTTP connections, static content, and reverse proxying.
+  - Good at serving files and managing lots of connections efficiently.
+  - Often used as the “front door” before the application.
+
+- Application server
+  - Executes the application code (business logic).
+  - Generates dynamic content and talks to databases, caches, APIs.
+  - Examples: Gunicorn/uWSGI (Python), PHP-FPM (PHP), Puma (Ruby), Node.js runtime, etc.
+
+6) Summary: what problems this improves
+
+- Removes the load balancer SPOF by adding a second HAProxy in a cluster.
+- Reduces resource contention by isolating DB from web/app workloads.
+- Makes the system easier to scale and maintain:
+  - Add more web servers if static/HTTP traffic increases,
+  - add more app servers if CPU-bound logic increases,
+  - scale database separately (replication/sharding) if data load grows.
+
